@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Attendance Scanner</title>
+  <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <style>
+    :root { --ok:#1e8e3e; --warn:#e37400; --bad:#d93025; --work:#1a73e8; --idle:#5f6368; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:#f1f3f4; color:#202124; }
+    header { background:#202124; color:#fff; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; gap:12px; font-size:14px; }
+    header span { opacity:.75; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    header a { color:#8ab4f8; cursor:pointer; text-decoration:underline; white-space:nowrap; }
+    main { max-width:520px; margin:0 auto; padding:12px; }
+    .hidden { display:none !important; }
+    .result { border-radius:12px; padding:16px; color:#fff; margin-bottom:12px; min-height:96px; }
+    .result.idle { background:var(--idle); } .result.working { background:var(--work); }
+    .result.ok { background:var(--ok); } .result.warn { background:var(--warn); } .result.bad { background:var(--bad); }
+    #resultTitle { font-size:20px; font-weight:700; margin-bottom:6px; }
+    #resultBody div { font-size:15px; line-height:1.4; }
+    #reader { width:100%; border-radius:12px; overflow:hidden; background:#000; min-height:48px; }
+    .row { display:flex; gap:8px; margin:12px 0; }
+    button { flex:1; padding:14px; font-size:16px; border:0; border-radius:10px; background:#dadce0; color:#202124; }
+    button.primary { background:var(--work); color:#fff; font-weight:600; }
+    button:disabled { opacity:.5; }
+    .card { background:#fff; border-radius:12px; padding:16px; margin-bottom:12px; }
+    .card h3 { margin:0 0 8px; font-size:15px; }
+    .card p { margin:0 0 12px; font-size:14px; line-height:1.4; }
+    label { display:block; font-size:13px; color:#5f6368; margin-bottom:6px; }
+    input[type=text] { flex:1; padding:12px; font-size:16px; border:1px solid #bdc1c6; border-radius:10px; text-transform:uppercase; }
+    ul { list-style:none; margin:0; padding:0; font-size:14px; }
+    li { padding:6px 0; border-top:1px solid #eee; display:flex; justify-content:space-between; gap:8px; }
+    li:first-child { border-top:0; }
+    .tag { font-weight:600; } .tag.ok { color:var(--ok); } .tag.warn { color:var(--warn); } .tag.bad { color:var(--bad); }
+    #signinMsg { color:var(--bad); font-weight:600; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Attendance Scanner</strong>
+    <span id="who"></span>
+    <a id="signOut" class="hidden">Sign out</a>
+  </header>
+
+  <main>
+    <!-- Sign-in screen -->
+    <section id="signin" class="card">
+      <h3>Staff sign-in</h3>
+      <p id="signinMsg" class="hidden"></p>
+      <p>Sign in with your authorized Google account to record attendance.</p>
+      <div id="gbtn"></div>
+    </section>
+
+    <!-- Scanner screen (shown after a successful sign-in) -->
+    <section id="app" class="hidden">
+      <div id="result" class="result idle" role="status" aria-live="polite">
+        <div id="resultTitle">Ready</div>
+        <div id="resultBody"><div>Tap "Start camera" and point it at a client QR code.</div></div>
+      </div>
+
+      <div id="reader"></div>
+      <div class="row">
+        <button id="btnStart" class="primary">Start camera</button>
+        <button id="btnStop" disabled>Stop camera</button>
+      </div>
+
+      <div class="card">
+        <label for="manualId">Camera not working? Type the Client ID, or use a USB/Bluetooth scanner here</label>
+        <div class="row" style="margin:0 0 10px">
+          <input id="manualId" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="CL-XXXXXXXXXXXX">
+          <button id="btnManual" style="flex:0 0 auto">Submit</button>
+        </div>
+        <label for="photo">Or take a photo of the QR code</label>
+        <input id="photo" type="file" accept="image/*" capture="environment">
+      </div>
+
+      <div class="card">
+        <h3>This session</h3>
+        <ul id="log"><li><span>No scans yet</span></li></ul>
+      </div>
+    </section>
+  </main>
+
+<script>
+/* ===== EDIT THESE TWO LINES ===== */
+var CONFIG = {
+  API_URL: 'https://script.google.com/macros/s/AKfycbwDFnp-gRpps0I3e269khfiTorGsvcH_dlWYSV-82c38N9f7E6AWMFGrx2c1VeZssL-_w/exec',                       // ends with /exec
+  GOOGLE_CLIENT_ID: '259887370871-tbpm9omgc4cadqdlcroo9cuqvuskdtl1.apps.googleusercontent.com'
+};
+/* ================================= */
+
+(function () {
+  var COOLDOWN_MS = 2500;      // pause between submissions
+  var SAME_CODE_MS = 8000;     // ignore the same code held in front of the camera
+  var qr = null, running = false, busy = false, lastCode = '', lastAt = 0, logCount = 0;
+  var idToken = null, pendingCode = null;
+  var $ = function (id) { return document.getElementById(id); };
+
+  /* ---------- Google Sign-In ---------- */
+  window.onGoogleLibraryLoad = function () {
+    google.accounts.id.initialize({
+      client_id: CONFIG.GOOGLE_CLIENT_ID,
+      callback: onCredential,
+      auto_select: true,
+      cancel_on_tap_outside: false
+    });
+    google.accounts.id.renderButton($('gbtn'), { theme: 'filled_blue', size: 'large', text: 'signin_with', width: 260 });
+    google.accounts.id.prompt();
+  };
+
+  function onCredential(resp) {
+    idToken = resp.credential;
+    callApi({ action: 'whoami' }).then(function (r) {
+      if (r.status === 'READY') {
+        $('who').textContent = r.email;
+        $('signin').classList.add('hidden');
+        $('app').classList.remove('hidden');
+        $('signOut').classList.remove('hidden');
+        $('signinMsg').classList.add('hidden');
+        if (pendingCode) { var c = pendingCode; pendingCode = null; submit(c); }
+      } else {
+        idToken = null;
+        showSignIn(r.message || 'Sign-in failed. Please try again.');
+      }
+    }).catch(function () {
+      idToken = null;
+      showSignIn('Could not reach the server. Check the internet connection and try again.');
+    });
+  }
+
+  function showSignIn(message) {
+    stopCamera();
+    $('app').classList.add('hidden');
+    $('signin').classList.remove('hidden');
+    $('signOut').classList.add('hidden');
+    $('who').textContent = '';
+    if (message) { $('signinMsg').textContent = message; $('signinMsg').classList.remove('hidden'); }
+    try { google.accounts.id.prompt(); } catch (e) {}
+  }
+
+  $('signOut').addEventListener('click', function () {
+    idToken = null; pendingCode = null;
+    try { google.accounts.id.disableAutoSelect(); } catch (e) {}
+    showSignIn('You have signed out.');
+  });
+
+  /* ---------- API ---------- */
+  function callApi(payload) {
+    if (!idToken) return Promise.resolve({ status: 'AUTH_REQUIRED' });
+    payload.idToken = idToken;
+    // No custom headers: keeps this a "simple" request so the browser does not need a CORS preflight.
+    return fetch(CONFIG.API_URL, { method: 'POST', body: JSON.stringify(payload) })
+      .then(function (r) { return r.json(); });
+  }
+
+  /* ---------- Scanner UI ---------- */
+  function getQr() {
+    if (!qr) qr = new Html5Qrcode('reader', { formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE], verbose: false });
+    return qr;
+  }
+
+  function setResult(kind, title, lines) {
+    $('result').className = 'result ' + kind;
+    $('resultTitle').textContent = title;
+    var body = $('resultBody');
+    body.textContent = '';
+    (lines || []).forEach(function (t) {
+      var d = document.createElement('div');
+      d.textContent = t;           // textContent: data from the sheet is never parsed as HTML
+      body.appendChild(d);
+    });
+  }
+
+  function beep(ok) {
+    try {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      var ctx = new Ctx(), o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = ok ? 880 : 220; g.gain.value = 0.15;
+      o.connect(g); g.connect(ctx.destination); o.start();
+      setTimeout(function () { o.stop(); ctx.close(); }, ok ? 120 : 350);
+    } catch (e) {}
+    try { if (navigator.vibrate) navigator.vibrate(ok ? 80 : [120, 60, 120]); } catch (e) {}
+  }
+
+  function addLog(kind, label, name) {
+    var ul = $('log');
+    if (logCount === 0) ul.textContent = '';
+    logCount++;
+    var li = document.createElement('li');
+    var left = document.createElement('span');
+    left.textContent = new Date().toLocaleTimeString() + '  ' + (name || '');
+    var right = document.createElement('span');
+    right.className = 'tag ' + kind; right.textContent = label;
+    li.appendChild(left); li.appendChild(right);
+    ul.insertBefore(li, ul.firstChild);
+    while (ul.children.length > 10) ul.removeChild(ul.lastChild);
+  }
+
+  function show(r) {
+    var lines;
+    switch (r.status) {
+      case 'OK':
+        lines = [r.name, 'Docket: ' + r.docket, 'Officer: ' + r.officer, 'Time: ' + r.time];
+        setResult('ok', '\u2714 Attendance recorded', lines); beep(true); addLog('ok', 'Recorded', r.name); break;
+      case 'WARNING':
+        lines = [r.name, 'Docket: ' + r.docket, 'Officer: ' + r.officer].concat(r.flags || []);
+        setResult('warn', '\u26A0 Recorded \u2014 needs attention', lines); beep(false); addLog('warn', 'Flagged', r.name); break;
+      case 'DUPLICATE':
+        setResult('warn', 'Already scanned', [r.name, r.message]); beep(false); addLog('warn', 'Duplicate', r.name); break;
+      case 'NOT_FOUND':
+        setResult('bad', '\u2716 QR code not recognized', [r.message]); beep(false); addLog('bad', 'Not found'); break;
+      case 'INVALID':
+        setResult('bad', '\u2716 Invalid QR code', [r.message]); beep(false); addLog('bad', 'Invalid'); break;
+      case 'DENIED':
+        setResult('bad', '\u2716 Not authorized', [r.message]); beep(false); addLog('bad', 'Denied'); break;
+      default:
+        setResult('bad', '\u2716 Error', [r.message || 'Unknown error.']); beep(false); addLog('bad', 'Error');
+    }
+  }
+
+  function release() { setTimeout(function () { busy = false; }, COOLDOWN_MS); }
+
+  function submit(code) {
+    if (busy) return;
+    busy = true;
+    var clean = String(code).slice(0, 100);
+    setResult('working', 'Checking\u2026', []);
+    callApi({ code: clean })
+      .then(function (r) {
+        if (r.status === 'AUTH_REQUIRED') {
+          // Sign-in expired (tokens last about an hour). Keep the scan and resend it after re-login.
+          idToken = null; pendingCode = clean; busy = false;
+          showSignIn('Your session expired. Please sign in again \u2014 the last scan will be sent automatically.');
+          return;
+        }
+        show(r); release();
+      })
+      .catch(function () {
+        setResult('bad', 'Connection problem',
+          ['Could not reach the server. Check the internet connection. This scan may not have been saved \u2014 check the Attendance sheet before scanning again.']);
+        beep(false); addLog('bad', 'No connection'); release();
+      });
+  }
+
+  function onScan(text) {
+    var now = Date.now();
+    if (busy || (text === lastCode && now - lastAt < SAME_CODE_MS)) return;
+    lastCode = text; lastAt = now;
+    submit(text);
+  }
+
+  async function startCamera() {
+    if (running) return;
+    try {
+      await getQr().start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: function (w, h) { var s = Math.floor(Math.min(w, h) * 0.75); return { width: s, height: s }; } },
+        onScan, function () {});
+      running = true; $('btnStart').disabled = true; $('btnStop').disabled = false;
+      setResult('idle', 'Scanning\u2026', ['Hold the QR code steady inside the box.']);
+    } catch (e) {
+      var why = (e && (e.name || e.message)) ? ' (' + (e.name || e.message) + ')' : '';
+      setResult('bad', 'Camera unavailable',
+        ['Allow camera access when your browser asks, or in the browser\u2019s site settings. You can also use the manual entry or photo options below.' + why]);
+    }
+  }
+
+  async function stopCamera() {
+    if (!running) return;
+    try { await qr.stop(); } catch (e) {}
+    running = false; $('btnStart').disabled = false; $('btnStop').disabled = true;
+  }
+
+  $('btnStart').addEventListener('click', startCamera);
+  $('btnStop').addEventListener('click', stopCamera);
+
+  function submitManual() {
+    var v = $('manualId').value.trim();
+    if (!v) return;
+    $('manualId').value = '';
+    submit(v);
+    $('manualId').focus();
+  }
+  $('btnManual').addEventListener('click', submitManual);
+  $('manualId').addEventListener('keydown', function (e) { if (e.key === 'Enter') submitManual(); });
+
+  $('photo').addEventListener('change', async function (ev) {
+    var f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    await stopCamera();
+    try { submit(await getQr().scanFile(f, false)); }
+    catch (e) { setResult('bad', 'No QR code found in photo', ['Retake the photo with the code centered, flat and well lit.']); beep(false); }
+    ev.target.value = '';
+  });
+})();
+</script>
+</body>
+</html>
